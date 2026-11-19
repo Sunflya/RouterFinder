@@ -1,0 +1,51 @@
+name: Build Unsigned IPA
+
+on:
+  workflow_dispatch:        # 允许在 Actions 页面手动点按钮触发
+  push:
+    branches: [ main ]     # 推送到 main 分支时自动构建；不需要可删掉这两行
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 XcodeGen
+        run: brew install xcodegen
+
+      - name: 生成 Xcode 工程
+        run: xcodegen generate
+
+      - name: 归档（关闭代码签名）
+        run: |
+          xcodebuild archive \
+            -project RouterFinder.xcodeproj \
+            -scheme RouterFinder \
+            -configuration Release \
+            -archivePath build/RouterFinder.xcarchive \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            PROVISIONING_PROFILE_SPECIFIER=""
+
+      - name: 打包成无签名 IPA
+        run: |
+          rm -rf build/Payload
+          mkdir -p build/Payload
+          APP_PATH="$(find build/RouterFinder.xcarchive/Products/Applications -maxdepth 1 -name '*.app' | head -1)"
+          echo "找到 App: $APP_PATH"
+          cp -R "$APP_PATH" build/Payload/
+          cd build
+          zip -r -9 RouterFinder-unsigned.ipa Payload
+          ls -la RouterFinder-unsigned.ipa
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: RouterFinder-unsigned-ipa
+          path: build/RouterFinder-unsigned.ipa
+          retention-days: 14
