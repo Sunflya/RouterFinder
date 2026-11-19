@@ -67,7 +67,7 @@ else
 fi
 
 if [[ "$BUNDLE_ID" == "com.sunflya.routerfinder" ]]; then
-  echo "提示: 正在使用默认 Bundle ID $BUNDLE_ID（越狱模式无影响；上架/侧载建议改成唯一值）" >&2
+  echo "提示: 正在使用默认 Bundle ID ${BUNDLE_ID}（越狱模式无影响；上架/侧载建议改成唯一值）" >&2
 fi
 
 echo "[环境] $(sw_vers -productName 2>/dev/null || echo macOS) $(sw_vers -productVersion 2>/dev/null || true)"
@@ -129,7 +129,7 @@ plutil -lint Info.plist >/dev/null
 
 # ---------- 越狱模式：无签名编译 + ldid 假签名 ----------
 if [[ "$MODE" == "jailbreak" ]]; then
-  echo "[2/4] 无签名编译（Bundle ID: $BUNDLE_ID）…"
+  echo "[2/4] 无签名编译（Bundle ID: ${BUNDLE_ID}）…"
   command -v ldid >/dev/null 2>&1 || { echo "未安装 ldid，请先执行: brew install ldid" >&2; exit 1; }
 
   xcodebuild \
@@ -187,7 +187,7 @@ if [[ "$MODE" == "jailbreak" ]]; then
 fi
 
 # ---------- 生成导出配置 ----------
-echo "[2/4] 生成导出配置（method=$METHOD）…"
+echo "[2/4] 生成导出配置（method=${METHOD}）…"
 if [[ "$MODE" == "manual" ]]; then
   sed \
     -e "s/__METHOD__/$METHOD/g" \
@@ -204,7 +204,7 @@ fi
 plutil -lint ExportOptions.plist >/dev/null
 
 # ---------- 归档 ----------
-echo "[3/4] 归档（模式=$MODE）…"
+echo "[3/4] 归档（模式=${MODE}）…"
 ARCHIVE_CMD=(
   xcodebuild
   -project "$PROJECT"
