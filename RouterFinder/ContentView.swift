@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct ContentView: View {
-    @StateObject private var viewModel = ScannerViewModel()
+    @EnvironmentObject var viewModel: ScannerViewModel
 
     var body: some View {
         NavigationStack {
@@ -82,6 +82,14 @@ private struct DeviceRow: View {
                             .padding(.vertical, 2)
                             .background(.orange.opacity(0.18), in: Capsule())
                             .foregroundStyle(.orange)
+                    }
+                    if device.dhcpStatus == .detected {
+                        Text("DHCP ✓")
+                            .font(.caption2)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(.green.opacity(0.18), in: Capsule())
+                            .foregroundStyle(.green)
                     }
                 }
                 Text(device.ip + " · " + device.portSummary)

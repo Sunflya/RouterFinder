@@ -65,9 +65,16 @@ final class ScannerViewModel: ObservableObject {
                 Self.merge(device, into: &merged)
             }
 
+            // DHCP 主动探测：广播 Discover，用 Offer 里的 Server Identifier 精确标记 DHCP 服务器
+            self.progressText = "正在探测 DHCP 服务器…"
+            let dhcp = await DHCPProber.probeNetwork()
+            guard !Task.isCancelled, self.scanGeneration == generation else { return }
+            Self.applyDHCP(dhcp, to: &merged)
+
             self.devices = Array(merged.values).routerFirstSorted
             self.progress = 1
-            self.progressText = "扫描完成，发现 \(self.devices.count) 台设备"
+            let dhcpCount = self.devices.filter { $0.dhcpStatus == .detected }.count
+            self.progressText = "扫描完成，发现 \(self.devices.count) 台设备" + (dhcpCount > 0 ? "，其中 \(dhcpCount) 台开启 DHCP" : "")
             self.isScanning = false
             self.bonjourScanner = nil
         }
@@ -99,6 +106,45 @@ final class ScannerViewModel: ObservableObject {
             )
             self.bonjourScanner = scanner
         }
+    }
+
+    /// 把 DHCP 广播探测结果应用到设备：Offer 的 Server Identifier 就是 DHCP 服务器真实 IP。
+    private static func applyDHCP(_ result: DHCPProbeResult, to devices: inout [String: DiscoveredDevice]) {
+        guard result.success, let serverIP = result.serverIP else {
+            // 探测失败时，给最像路由器的设备标注失败，便于用户手动复测
+            if let gateway = devices.values.first(where: { $0.sources.contains(.gateway) }) {
+                var updated = gateway
+                updated.dhcpStatus = .failed
+                updated.dhcpInfo = result
+                devices[gateway.ip] = updated
+            }
+            return
+        }
+
+        if var server = devices[serverIP] {
+            server.dhcpStatus = .detected
+            server.dhcpInfo = result
+            if !server.sources.contains(.gateway) { server.sources.append(.gateway) }
+            devices[serverIP] = server
+        } else {
+            // DHCP 服务器没被端口扫描发现（很常见，DHCP 不一定开那些端口），补一台进去
+            let device = DiscoveredDevice(
+                ip: serverIP,
+                openPorts: [],
+                sources: [.gateway],
+                dhcpStatus: .detected,
+                dhcpInfo: result
+            )
+            devices[serverIP] = device
+        }
+    }
+
+    /// 详情页手动对单台设备做定向 DHCP 检测。
+    func recheckDHCP(for ip: String) async {
+        let result = await DHCPProber.probe(host: ip)
+        guard let index = devices.firstIndex(where: { $0.ip == ip }) else { return }
+        devices[index].dhcpInfo = result
+        devices[index].dhcpStatus = result.success ? .detected : .notDetected
     }
 
     private static func merge(_ device: DiscoveredDevice, into dict: inout [String: DiscoveredDevice]) {

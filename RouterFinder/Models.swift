@@ -6,6 +6,14 @@ enum DiscoverySource: String, Hashable {
     case bonjour = "Bonjour"
 }
 
+/// DHCP 服务器的判定状态
+enum DHCPStatus: String, Hashable {
+    case unknown = "未检测"
+    case detected = "已确认开启"
+    case notDetected = "未检测到"
+    case failed = "探测失败"
+}
+
 struct DiscoveredDevice: Identifiable, Hashable {
     let id: String
     let ip: String
@@ -13,13 +21,17 @@ struct DiscoveredDevice: Identifiable, Hashable {
     var openPorts: [Int]
     var sources: [DiscoverySource]
     var serviceNames: [String]
+    var dhcpStatus: DHCPStatus = .unknown
+    var dhcpInfo: DHCPProbeResult?
 
     init(
         ip: String,
         hostname: String? = nil,
         openPorts: [Int] = [],
         sources: [DiscoverySource] = [],
-        serviceNames: [String] = []
+        serviceNames: [String] = [],
+        dhcpStatus: DHCPStatus = .unknown,
+        dhcpInfo: DHCPProbeResult? = nil
     ) {
         self.id = ip
         self.ip = ip
@@ -27,6 +39,8 @@ struct DiscoveredDevice: Identifiable, Hashable {
         self.openPorts = openPorts.sorted()
         self.sources = sources
         self.serviceNames = serviceNames
+        self.dhcpStatus = dhcpStatus
+        self.dhcpInfo = dhcpInfo
     }
 
     /// 根据端口指纹和发现方式判断是否很可能是 DHCP 路由器
