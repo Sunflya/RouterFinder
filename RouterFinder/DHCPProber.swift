@@ -17,7 +17,7 @@ struct DHCPProbeResult: Hashable {
     let routerIP: String?          // option 3
     let dnsServers: [String]       // option 6
     let broadcastIP: String?       // option 28
-    let sourcePort: UInt16?        // 本地用于接收的端口
+    var sourcePort: UInt16?        // 本地用于接收的端口
     let diagnostic: String         // 给排错用的说明
 
     var summary: String {
@@ -128,21 +128,12 @@ enum DHCPProber {
             return fail("发送 Discover 失败 errno=\(errno)")
         }
 
-        // 等待 Offer
+        // 等待 Offer（用 poll，避免 Swift 无法调用 select 的 FD_* 宏）
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            var fds = fd_set()
-            FD_ZERO(&fds)
-            FD_SET(fd, &fds)
-            var tv = timeval(tv_sec: 1, tv_usec: 0)
-            let ready = withUnsafeMutablePointer(to: &fds) { fp -> Int32 in
-                withUnsafeMutablePointer(to: &tv) { tp in
-                    select(fd + 1, fp, nil, nil, tp)
-                }
-            }
-            if ready <= 0 { continue }
-            let isSet = withUnsafeMutablePointer(to: &fds) { fp -> Bool in FD_ISSET(fd, fp) != 0 }
-            guard isSet else { continue }
+            var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            let ready = withUnsafeMutablePointer(to: &pfd) { poll($0, 1, 1000) }
+            if ready <= 0 || (pfd.revents & Int16(POLLIN)) == 0 { continue }
 
             var buffer = [UInt8](repeating: 0, count: 2048)
             var from = sockaddr_in()
@@ -205,7 +196,7 @@ enum DHCPProber {
 
         var msgType: UInt8 = 0
         var serverIP: String?
-        var offeredIP = ipFrom(data[16..<20])
+        let offeredIP = ipFrom(data[16..<20])
         var lease: UInt32?
         var mask: String?
         var router: String?
