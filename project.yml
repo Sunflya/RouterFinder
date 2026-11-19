@@ -1,0 +1,47 @@
+name: RouterFinder
+options:
+  bundleIdPrefix: com.sunflya
+  deploymentTarget:
+    iOS: "17.2"
+  xcodeVersion: "15.1"
+  groupSortPosition: top
+
+settings:
+  SWIFT_VERSION: "5.9"
+  SWIFT_STRICT_CONCURRENCY: minimal
+  TARGETED_DEVICE_FAMILY: "1"
+  SUPPORTED_PLATFORMS: "iphoneos"
+  CODE_SIGN_STYLE: Automatic
+  DEVELOPMENT_TEAM: "YOUR_TEAM_ID"
+  ENABLE_PREVIEWS: YES
+  IPHONEOS_DEPLOYMENT_TARGET: "17.2"
+
+targets:
+  RouterFinder:
+    type: application
+    platform: iOS
+    sources:
+      - path: RouterFinder
+    settings:
+      PRODUCT_NAME: "路由器探测"
+      PRODUCT_BUNDLE_IDENTIFIER: "com.sunflya.routerfinder"
+      INFOPLIST_KEY_UILaunchScreen_Generation: YES
+      INFOPLIST_KEY_UISupportedInterfaceOrientations:
+        - UIInterfaceOrientationPortrait
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: "路由器探测"
+        NSLocalNetworkUsageDescription: "需要访问局域网，以发现 DHCP 路由器与其他网络设备。"
+        NSBonjourServices:
+          - _http._tcp.
+          - _https._tcp.
+          - _raop._tcp.
+          - _airplay._tcp.
+          - _ipp._tcp.
+          - _printer._tcp.
+          - _smb._tcp.
+          - _ssh._tcp.
+          - _services._dns-sd._udp.
+        UIRequiredDeviceCapabilities:
+          - arm64
