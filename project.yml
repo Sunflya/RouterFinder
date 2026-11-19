@@ -29,6 +29,7 @@ targets:
       # Payload/RouterFinder.app/RouterFinder；中文名只放在 CFBundleDisplayName。
       PRODUCT_NAME: "RouterFinder"
       PRODUCT_BUNDLE_IDENTIFIER: "com.sunflya.routerfinder"
+      ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
       INFOPLIST_KEY_UILaunchScreen_Generation: YES
       INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
       INFOPLIST_KEY_UISupportedInterfaceOrientations:
