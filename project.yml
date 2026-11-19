@@ -21,7 +21,7 @@ targets:
     type: application
     platform: iOS
     sources:
-      - path: RouterFinder
+      - .
     settings:
       PRODUCT_NAME: "路由器探测"
       PRODUCT_BUNDLE_IDENTIFIER: "com.sunflya.routerfinder"
