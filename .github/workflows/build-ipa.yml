@@ -10,19 +10,32 @@ jobs:
     steps:
       - name: 拉取代码
         uses: actions/checkout@v4
-      - name: 查看目录
+
+      - name: 查看目录（调试用，成功后可删）
         run: ls -la
+
       - name: 安装 XcodeGen
         run: brew install xcodegen
-      - name: 自动创建RouterFinder子目录，适配旧project.yml
+
+      - name: 创建RouterFinder子目录并移动源码（兼容macOS）
         run: |
           mkdir -p RouterFinder
-          shopt -s extglob
-          mv !(RouterFinder|.git|.github) RouterFinder/ || true
+          find . -maxdepth 1 \
+            ! -name '.' \
+            ! -name 'RouterFinder' \
+            ! -name '.git' \
+            ! -name '.github' \
+            -exec mv {} RouterFinder/ \;
+
+      - name: 查看移动后的目录结构（调试）
+        run: ls -la RouterFinder/
+
       - name: 生成 Xcode 工程
         run: xcodegen generate
+
       - name: 清理旧构建目录
         run: rm -rf build
+
       - name: 归档（关闭代码签名）
         run: |
           xcodebuild archive \
@@ -34,6 +47,7 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             PROVISIONING_PROFILE_SPECIFIER=""
+
       - name: 打包成无签名 IPA
         run: |
           rm -rf build/Payload
@@ -44,6 +58,7 @@ jobs:
           cd build
           zip -r -9 RouterFinder-unsigned.ipa Payload
           ls -la RouterFinder-unsigned.ipa
+
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
