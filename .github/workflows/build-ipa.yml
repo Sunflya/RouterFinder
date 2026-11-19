@@ -1,0 +1,58 @@
+name: Build jailbreak IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_id:
+        description: 'Bundle ID（越狱安装可保持默认）'
+        required: false
+        default: 'com.sunflya.routerfinder'
+        type: string
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      BUNDLE_ID: ${{ github.event.inputs.bundle_id || 'com.sunflya.routerfinder' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 16.4
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.4.app
+          xcodebuild -version
+
+      - name: Install build tools
+        run: brew install xcodegen ldid
+
+      - name: Build jailbroken IPA
+        shell: bash
+        run: |
+          chmod +x build.sh
+          JAILBREAK=1 BUNDLE_ID="$BUNDLE_ID" ./build.sh
+
+      - name: Verify IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          IPA="build/ipa/RouterFinder-jailbroken.ipa"
+          test -s "$IPA"
+          unzip -t "$IPA" >/dev/null
+          BUNDLE_IN_IPA="$(unzip -p "$IPA" Payload/RouterFinder.app/Info.plist \
+            | plutil -extract CFBundleIdentifier raw -o - -)"
+          test "$BUNDLE_IN_IPA" = "$BUNDLE_ID"
+          shasum -a 256 "$IPA" > "$IPA.sha256.txt"
+          echo "IPA 校验通过，Bundle ID: $BUNDLE_IN_IPA"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RouterFinder-jailbroken-ipa
+          path: |
+            build/ipa/RouterFinder-jailbroken.ipa
+            build/ipa/RouterFinder-jailbroken.ipa.sha256.txt
+          retention-days: 30
+          if-no-files-found: error

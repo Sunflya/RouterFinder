@@ -1,0 +1,10 @@
+build/
+*.xcarchive
+DerivedData/
+ExportOptions.plist
+RouterFinder.xcodeproj/
+*.xcworkspace/
+Info.plist
+.DS_Store
+__pycache__/
+*.pyc
