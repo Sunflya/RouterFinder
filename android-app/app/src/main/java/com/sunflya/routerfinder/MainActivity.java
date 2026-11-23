@@ -221,7 +221,7 @@ public class MainActivity extends Activity {
         }
         for (final Device d : devices) {
             TextView row = new TextView(this);
-            String badge;
+            String badge = "";
             if (d.dhcpState == Device.DhcpState.YES) {
                 badge = "  DHCP ✓";
                 row.setTextColor(Color.rgb(0, 120, 70));
