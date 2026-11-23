@@ -117,7 +117,8 @@ static NSString *gMobileScanCallbackError = nil;
 
 static void RFTMobileScanCallback(RFTWiFiDeviceRef device, CFArrayRef results, CFErrorRef error, void *token) {
     if (error) {
-        gMobileScanCallbackError = [NSString stringWithFormat:@"%@", [error localizedDescription]];
+        NSString *desc = CFBridgingRelease(CFErrorCopyDescription(error));
+        gMobileScanCallbackError = desc.length > 0 ? desc : @"未知错误";
     }
     if (results) {
         NSMutableArray *arr = [NSMutableArray array];
