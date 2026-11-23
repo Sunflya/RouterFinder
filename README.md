@@ -1,6 +1,23 @@
 # 路由器探测（RouterFinder）
 
-一个 iOS 应用，用于发现局域网中的 DHCP 小路由器和其他网络设备，支持 **iOS 17.2 / 17.2.1 及以上**。
+一个用于发现局域网中 DHCP 小路由器的工具，同时提供 **iOS 越狱版 IPA** 和 **Android 版 APK**。
+
+- iOS：支持 17.2 / 17.2.1 及以上，越狱设备安装（ldid 假签名）
+- Android：支持 7.0 ~ 14+，无需 root，正常签名 APK
+
+两个平台都支持主动 DHCP Discover/Offer 探测，能确凿判断某台设备是否真的在运行 DHCP 服务器。
+
+## 🤖 安卓版（APK）
+
+源码在 `android-app/`（Java + Gradle + Android Gradle Plugin），`.github/workflows/build-apk.yml` 会在云端 Ubuntu 上构建带签名的 release APK：
+
+1. 打开仓库 **Actions** → **Build Android APK** → **Run workflow**；
+2. 下载 Artifacts 中的 `RouterFinder-android-apk`，解压得到 `app-release.apk`；
+3. 传到手机安装（需允许「安装未知来源应用」），首次打开允许位置权限（安卓要求，用于读取 Wi‑Fi 信息）。
+
+签名证书 `android-app/app/routerfinder.p12`（密码 `123456`，别名 `routerfinder`）随仓库保存，重新构建可覆盖安装。详细说明见 `安卓版说明.md`。
+
+---
 
 ## 重要说明：关于“生成 IPA”
 
