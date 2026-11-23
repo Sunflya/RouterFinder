@@ -41,7 +41,7 @@ struct DHCPProbeResult: Hashable {
 enum DHCPProber {
 
     /// 网络级探测：广播 Discover，找出当前网络里真正响应的 DHCP 服务器。
-    static func probeNetwork(timeout: TimeInterval = 3.0) async -> DHCPProbeResult {
+    static func probeNetwork(timeout: TimeInterval = 1.4) async -> DHCPProbeResult {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
                 continuation.resume(returning: probeSync(targetIP: nil, timeout: timeout))
@@ -50,7 +50,7 @@ enum DHCPProber {
     }
 
     /// 定向探测：向指定 IP 单播 Discover，判断「这一台」是否开了 DHCP 服务。
-    static func probe(host: String, timeout: TimeInterval = 3.0) async -> DHCPProbeResult {
+    static func probe(host: String, timeout: TimeInterval = 2.4) async -> DHCPProbeResult {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
                 continuation.resume(returning: probeSync(targetIP: host, timeout: timeout))
@@ -62,11 +62,13 @@ enum DHCPProber {
 
     /// 多策略尝试：68（能绑到就最可靠）→ 高位端口（依赖服务器回显源端口）。
     private static func probeSync(targetIP: String?, timeout: TimeInterval) -> DHCPProbeResult {
-        let ports: [UInt16] = [68, 1068, 6767, 15432]
+        // 广播探测只需最常见两种端口；定向探测再多试一个，控制总耗时
+        let ports: [UInt16] = targetIP == nil ? [68, 1068] : [68, 1068, 6767]
+        let perAttempt = max(0.35, timeout / Double(ports.count))
         var notes: [String] = []
 
         for port in ports {
-            let outcome = attempt(port: port, targetIP: targetIP, timeout: timeout)
+            let outcome = attempt(port: port, targetIP: targetIP, timeout: perAttempt)
             if outcome.success { return outcome }
             notes.append(outcome.diagnostic)
         }
@@ -132,7 +134,7 @@ enum DHCPProber {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
-            let ready = withUnsafeMutablePointer(to: &pfd) { poll($0, 1, 1000) }
+            let ready = withUnsafeMutablePointer(to: &pfd) { poll($0, 1, 150) }
             if ready <= 0 || (pfd.revents & Int16(POLLIN)) == 0 { continue }
 
             var buffer = [UInt8](repeating: 0, count: 2048)

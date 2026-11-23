@@ -52,13 +52,13 @@ public final class DhcpProber {
 
         try {
             socket.setBroadcast(true);
-            socket.setSoTimeout(1200);
+            socket.setSoTimeout(700);
             byte[] discover = buildDiscover(mac, xid);
             DatagramPacket out = new DatagramPacket(
                     discover, discover.length, InetAddress.getByName(target), 67);
             socket.send(out);
 
-            long deadline = System.currentTimeMillis() + 4000;
+            long deadline = System.currentTimeMillis() + 2200;
             while (System.currentTimeMillis() < deadline) {
                 byte[] buf = new byte[2048];
                 DatagramPacket reply = new DatagramPacket(buf, buf.length);
@@ -76,7 +76,7 @@ public final class DhcpProber {
                         + "，源 " + reply.getAddress().getHostAddress() + "）";
                 return parsed;
             }
-            result.detail = "已发送 Discover，4 秒内未收到 Offer（绑定" + bindMode
+            result.detail = "已发送 Discover，2 秒内未收到 Offer（绑定" + bindMode
                     + "）。该设备可能未运行 DHCP 服务，或对源端口有要求。";
             return result;
         } catch (Exception e) {

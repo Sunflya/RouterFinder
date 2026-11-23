@@ -39,6 +39,14 @@ struct ContentView: View {
                     }
                 }
 
+                Section("无线环境") {
+                    NavigationLink {
+                        WifiView()
+                    } label: {
+                        Label("附近 WiFi 频宽与信号强度", systemImage: "wifi")
+                    }
+                }
+
                 Section("发现的设备（\(viewModel.devices.count)）") {
                     if viewModel.devices.isEmpty {
                         Text("点击上方按钮开始扫描。首次运行请在弹窗中允许「本地网络」权限。")

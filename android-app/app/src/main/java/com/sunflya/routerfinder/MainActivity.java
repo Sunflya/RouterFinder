@@ -28,12 +28,18 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 public class MainActivity extends Activity {
     private Button scanButton;
+    private Button wifiButton;
     private TextView statusText;
     private TextView summaryText;
+    private TextView wifiSummary;
     private LinearLayout listBox;
+    private LinearLayout wifiBox;
     private final Handler main = new Handler(Looper.getMainLooper());
     private volatile boolean scanning = false;
     private List<Device> devices = new ArrayList<>();
@@ -96,6 +102,38 @@ public class MainActivity extends Activity {
         root.addView(listBox, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
+        TextView wifiTitle = new TextView(this);
+        wifiTitle.setText("附近 WiFi · 频宽与信号强度");
+        wifiTitle.setTextSize(17);
+        wifiTitle.setTextColor(Color.rgb(20, 28, 60));
+        LinearLayout.LayoutParams wtLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        wtLp.setMargins(0, 28, 0, 10);
+        root.addView(wifiTitle, wtLp);
+
+        wifiButton = new Button(this);
+        wifiButton.setText("扫描附近 WiFi");
+        wifiButton.setTextSize(15);
+        wifiButton.setBackgroundColor(Color.rgb(26, 130, 120));
+        wifiButton.setTextColor(Color.WHITE);
+        root.addView(wifiButton, ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        wifiButton.setOnClickListener(v -> scanWifi());
+
+        wifiSummary = new TextView(this);
+        wifiSummary.setText("尚未扫描");
+        wifiSummary.setTextSize(12);
+        wifiSummary.setTextColor(Color.rgb(100, 110, 135));
+        LinearLayout.LayoutParams wsLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        wsLp.setMargins(0, 10, 0, 8);
+        root.addView(wifiSummary, wsLp);
+
+        wifiBox = new LinearLayout(this);
+        wifiBox.setOrientation(LinearLayout.VERTICAL);
+        root.addView(wifiBox, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
         setContentView(scroll);
 
         if (Build.VERSION.SDK_INT >= 23
@@ -137,16 +175,31 @@ public class MainActivity extends Activity {
             main.post(() -> statusText.setText("网段 " + info.netAddress + "/" + info.prefix
                     + " · 网关 " + info.gateway + " · 正在扫描设备…"));
 
-            final List<Device> found = new SubnetScanner().scan(info, (done, total, text) ->
-                    main.post(() -> statusText.setText(text)));
+            main.post(() -> statusText.setText("DHCP 探测与设备扫描并行进行…"));
+
+            // DHCP 广播探测与端口扫描并行执行，避免串行等待叠加耗时
+            ExecutorService pool = Executors.newFixedThreadPool(2);
+            Future<DhcpProber.Result> dhcpFuture = pool.submit(
+                    () -> DhcpProber.probe(getApplicationContext(), "255.255.255.255"));
+            Future<List<Device>> scanFuture = pool.submit(
+                    () -> new SubnetScanner().scan(info, (done, total, text) ->
+                            main.post(() -> statusText.setText(text))));
+
+            final List<Device> found;
+            final DhcpProber.Result dhcp;
+            try {
+                found = scanFuture.get();
+                dhcp = dhcpFuture.get();
+            } catch (Exception e) {
+                pool.shutdownNow();
+                main.post(() -> finishScan("扫描异常: " + e.getMessage()));
+                return;
+            }
+            pool.shutdownNow();
 
             // Fill MAC addresses from ARP cache
             Map<String, String> arp = SubnetScanner.readArp();
             for (Device d : found) d.mac = arp.get(d.ip);
-
-            // Active DHCP probe via broadcast; option 54 tells us the real server
-            main.post(() -> statusText.setText("正在发送 DHCP Discover 探测服务器…"));
-            DhcpProber.Result dhcp = DhcpProber.probe(getApplicationContext(), "255.255.255.255");
             boolean matched = false;
             for (Device d : found) {
                 if (dhcp.detected && dhcp.serverId != null && dhcp.serverId.equals(d.ip)) {
@@ -192,6 +245,53 @@ public class MainActivity extends Activity {
         if (error != null) {
             statusText.setText(error);
             Toast.makeText(this, error, Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void scanWifi() {
+        wifiButton.setEnabled(false);
+        wifiButton.setText("扫描中…");
+        wifiSummary.setText("正在扫描附近 WiFi…");
+        new Thread(() -> {
+            final List<WifiScanner.Network> nets = WifiScanner.scan(this);
+            final String diag = WifiScanner.diagnostic;
+            main.post(() -> {
+                renderWifi(nets, diag);
+                wifiButton.setEnabled(true);
+                wifiButton.setText("扫描附近 WiFi");
+            });
+        }).start();
+    }
+
+    private void renderWifi(List<WifiScanner.Network> nets, String diagnostic) {
+        wifiBox.removeAllViews();
+        wifiSummary.setText(diagnostic);
+        if (nets.isEmpty()) {
+            TextView empty = new TextView(this);
+            empty.setText("没有发现网络。请确认 Wi-Fi 已开启并授予位置权限。");
+            empty.setTextColor(Color.rgb(110, 115, 130));
+            wifiBox.addView(empty);
+            return;
+        }
+        for (WifiScanner.Network n : nets) {
+            TextView row = new TextView(this);
+            row.setText(n.ssid + "\n" + n.rssi + " dBm · 信号 " + n.percent() + "% · "
+                    + n.band + " · 信道 " + (n.channel > 0 ? n.channel : "?")
+                    + " · 频宽 " + n.width + "\n" + n.security + " · " + n.bssid);
+            row.setTextSize(13);
+            int color = n.rssi >= -55 ? Color.rgb(0, 130, 75)
+                    : (n.rssi >= -70 ? Color.rgb(170, 105, 0) : Color.rgb(190, 55, 55));
+            row.setTextColor(color);
+            row.setPadding(18, 14, 18, 14);
+            GradientDrawable bg = new GradientDrawable();
+            bg.setColor(Color.WHITE);
+            bg.setCornerRadius(12);
+            bg.setStroke(1, Color.rgb(222, 228, 240));
+            row.setBackground(bg);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.setMargins(0, 0, 0, 8);
+            wifiBox.addView(row, lp);
         }
     }
 

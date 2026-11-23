@@ -45,18 +45,20 @@ final class ScannerViewModel: ObservableObject {
         scanTask = Task { [weak self] in
             guard let self = self else { return }
 
+            // DHCP 广播探测与端口扫描并行执行，避免串行等待叠加耗时
+            async let dhcpResult = DHCPProber.probeNetwork()
             let subnet = SubnetScanner()
-            let portDevices = await subnet.scan(networkInfo: info) { value, text in
+            let portDevices = await subnet.scan(networkInfo: info, priorityIPs: [info.gatewayAddress]) { value, text in
                 Task { @MainActor [weak self] in
                     guard let self = self, self.scanGeneration == generation else { return }
-                    self.progress = value * 0.85
+                    self.progress = value * 0.9
                     self.progressText = text
                 }
             }
 
             guard !Task.isCancelled, self.scanGeneration == generation else { return }
 
-            let bonjourDevices = await self.runBonjour()
+            let bonjourDevices = await self.runBonjour(timeout: 2.0)
 
             guard !Task.isCancelled, self.scanGeneration == generation else { return }
 
@@ -65,9 +67,7 @@ final class ScannerViewModel: ObservableObject {
                 Self.merge(device, into: &merged)
             }
 
-            // DHCP 主动探测：广播 Discover，用 Offer 里的 Server Identifier 精确标记 DHCP 服务器
-            self.progressText = "正在探测 DHCP 服务器…"
-            let dhcp = await DHCPProber.probeNetwork()
+            let dhcp = await dhcpResult
             guard !Task.isCancelled, self.scanGeneration == generation else { return }
             Self.applyDHCP(dhcp, to: &merged)
 
@@ -90,13 +90,13 @@ final class ScannerViewModel: ObservableObject {
         progressText = "已停止扫描"
     }
 
-    private func runBonjour() async -> [DiscoveredDevice] {
+    private func runBonjour(timeout: TimeInterval = 2.0) async -> [DiscoveredDevice] {
         progressText = "正在通过 Bonjour 发现服务…"
         let results = BonjourResults()
         return await withCheckedContinuation { continuation in
             let scanner = BonjourScanner()
             scanner.start(
-                timeout: 3.5,
+                timeout: timeout,
                 onFound: { device in
                     DispatchQueue.main.async { results.items.append(device) }
                 },
