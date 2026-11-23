@@ -44,8 +44,20 @@ jobs:
           BUNDLE_IN_IPA="$(unzip -p "$IPA" Payload/RouterFinder.app/Info.plist \
             | plutil -extract CFBundleIdentifier raw -o - -)"
           test "$BUNDLE_IN_IPA" = "$BUNDLE_ID"
+
+          VERSION_IN_IPA="$(unzip -p "$IPA" Payload/RouterFinder.app/Info.plist \
+            | plutil -extract CFBundleShortVersionString raw -o - -)"
+          test "$VERSION_IN_IPA" = "1.2"
+
+          # 验证假签名中确实携带 WiFi 私有权限
+          BIN="$RUNNER_TEMP/RouterFinder.bin"
+          unzip -p "$IPA" Payload/RouterFinder.app/RouterFinder > "$BIN"
+          ldid -e "$BIN" > "$RUNNER_TEMP/entitlements.plist"
+          WIFI_ENT="$(/usr/libexec/PlistBuddy -c 'Print :com.apple.wifi.manager-access' "$RUNNER_TEMP/entitlements.plist")"
+          test "$WIFI_ENT" = "true"
+
           shasum -a 256 "$IPA" > "$IPA.sha256.txt"
-          echo "IPA 校验通过，Bundle ID: $BUNDLE_IN_IPA"
+          echo "IPA 校验通过，Bundle ID: $BUNDLE_ID，版本: $VERSION_IN_IPA，WiFi 权限: $WIFI_ENT"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

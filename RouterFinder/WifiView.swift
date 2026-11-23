@@ -3,7 +3,7 @@ import SwiftUI
 struct WifiView: View {
     @State private var networks: [WifiNetworkInfo] = []
     @State private var isScanning = false
-    @State private var diagnostic = "尚未扫描"
+    @State private var diagnostic = "尚未扫描（需要越狱环境与 WiFi 私有权限）"
 
     var body: some View {
         List {
@@ -25,7 +25,7 @@ struct WifiView: View {
 
             Section("附近网络（\(networks.count)）") {
                 if networks.isEmpty {
-                    Text("点击上方按钮开始扫描。读取 WiFi 频宽与信号强度需要越狱环境（使用 Apple80211 私有接口）。")
+                    Text("点击上方按钮开始扫描。iOS 14+ 通过 MobileWiFi 私有接口读取信号强度与频宽，需要越狱环境及对应权限。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
@@ -63,7 +63,7 @@ struct WifiView: View {
 
     private func scan() {
         isScanning = true
-        diagnostic = "正在通过私有接口扫描…"
+        diagnostic = "正在通过 MobileWiFi 私有接口扫描…"
         DispatchQueue.global(qos: .userInitiated).async {
             let found = WifiProber.scanNearby()
             let message = WifiProber.diagnostic()

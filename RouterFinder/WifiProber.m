@@ -7,8 +7,13 @@
 
 static NSString *gDiagnostic = @"";
 
+#pragma mark - 通用转换工具
+
 static NSString *RFTString(id value) {
     if ([value isKindOfClass:[NSString class]]) return (NSString *)value;
+    if ([value isKindOfClass:[NSData class]]) {
+        return [[NSString alloc] initWithData:value encoding:NSUTF8StringEncoding];
+    }
     if ([value respondsToSelector:@selector(stringValue)]) return [value stringValue];
     return nil;
 }
@@ -16,6 +21,15 @@ static NSString *RFTString(id value) {
 static NSInteger RFTInt(id value) {
     if ([value respondsToSelector:@selector(integerValue)]) return [value integerValue];
     return 0;
+}
+
+/// RSSI 在 MobileWiFi 里可能直接是 NSNumber，也可能是 {"RSSI_CTL_AGR": number} 字典
+static NSInteger RFTRSSI(id value) {
+    if ([value isKindOfClass:[NSDictionary class]]) {
+        id v = [value objectForKey:@"RSSI_CTL_AGR"] ?: [value objectForKey:@"RSSI"];
+        return RFTInt(v);
+    }
+    return RFTInt(value);
 }
 
 /// 兼容三种返回形态：MHz 数值(20/40/80/160)、枚举值(1..5)、带 MHz 的字符串
@@ -60,14 +74,8 @@ static NSString *RFTSecurity(NSString *capabilities) {
     return @"开放";
 }
 
-@implementation WifiProber
-
-+ (NSString *)diagnostic {
-    return gDiagnostic;
-}
-
-/// Apple80211 的 scan 结果里，不同 iOS 版本使用的频宽键名不同，逐个尝试。
-+ (NSString *)widthFromNetwork:(NSDictionary *)network {
+/// 不同 iOS 版本、不同私有框架返回的频宽键名不一致，逐个尝试
+static NSString *RFTWidthFromNetwork(NSDictionary *network) {
     NSArray *keys = @[@"CHANNEL_WIDTH", @"CHANNEL_WIDTH_MHZ", @"WIFI_CHANNEL_WIDTH",
                       @"CHANNEL_FLAG", @"CHANNEL_FLAGS", @"CHANNEL_BANDWIDTH"];
     for (NSString *key in keys) {
@@ -77,7 +85,185 @@ static NSString *RFTSecurity(NSString *capabilities) {
     return @"未知";
 }
 
-/// CoreWLAN 在 iOS 上是私有框架，尝试用它补齐当前连接网络的频宽。
+/// 把任意一种私有框架返回的扫描结果字典统一转成模型
+static WifiNetworkInfo *RFTNetworkFromDictionary(NSDictionary *net) {
+    id ssidValue = [net objectForKey:@"SSID_STR"] ?: [net objectForKey:@"SSID"];
+    NSString *ssid = RFTString(ssidValue);
+    if (ssid.length == 0) ssid = @"(隐藏网络)";
+
+    WifiNetworkInfo *item = [[WifiNetworkInfo alloc] init];
+    item.ssid = ssid;
+    item.bssid = RFTString([net objectForKey:@"BSSID"]) ?: @"";
+    item.rssi = RFTRSSI([net objectForKey:@"RSSI"]);
+    item.channel = RFTInt([net objectForKey:@"CHANNEL"]);
+    if (item.channel == 0) item.channel = RFTInt([net objectForKey:@"CHANNEL_NUMBER"]);
+    item.frequencyMHz = RFTFrequency(item.channel);
+    item.band = RFTBand(item.frequencyMHz);
+    item.channelWidth = RFTWidthFromNetwork(net);
+    item.security = RFTSecurity(RFTString([net objectForKey:@"CAPABILITIES"]));
+    return item;
+}
+
+#pragma mark - MobileWiFi（iOS 14+ 主路径）
+
+typedef void *RFTWiFiManagerRef;
+typedef void *RFTWiFiDeviceRef;
+typedef void (*RFTWiFiScanCallback)(RFTWiFiDeviceRef, CFArrayRef, CFErrorRef, void *);
+
+static BOOL gMobileScanDone = NO;
+static NSArray<WifiNetworkInfo *> *gMobileScanResults = nil;
+static CFRunLoopRef gMobileScanRunLoop = NULL;
+static NSString *gMobileScanCallbackError = nil;
+
+static void RFTMobileScanCallback(RFTWiFiDeviceRef device, CFArrayRef results, CFErrorRef error, void *token) {
+    if (error) {
+        gMobileScanCallbackError = [NSString stringWithFormat:@"%@", [error localizedDescription]];
+    }
+    if (results) {
+        NSMutableArray *arr = [NSMutableArray array];
+        for (id obj in (__bridge NSArray *)results) {
+            if ([obj isKindOfClass:[NSDictionary class]]) {
+                [arr addObject:RFTNetworkFromDictionary((NSDictionary *)obj)];
+            }
+        }
+        gMobileScanResults = [arr copy];
+    }
+    gMobileScanDone = YES;
+    if (gMobileScanRunLoop) CFRunLoopStop(gMobileScanRunLoop);
+}
+
+/// iOS 14 起 Apple80211 已由 MobileWiFi 取代；使用异步扫描并在当前线程 RunLoop 上等待结果。
++ (NSArray<WifiNetworkInfo *> *)scanViaMobileWiFiError:(NSString **)errorMessage {
+    *errorMessage = nil;
+    void *handle = dlopen("/System/Library/PrivateFrameworks/MobileWiFi.framework/MobileWiFi", RTLD_NOW);
+    if (!handle) {
+        const char *e = dlerror();
+        *errorMessage = [NSString stringWithFormat:@"无法加载 MobileWiFi（%s）", e ?: "未知错误"];
+        return nil;
+    }
+
+    RFTWiFiManagerRef (*createFn)(CFAllocatorRef, int) =
+        (RFTWiFiManagerRef (*)(CFAllocatorRef, int))dlsym(handle, "WiFiManagerClientCreate");
+    CFArrayRef (*copyDevicesFn)(RFTWiFiManagerRef) =
+        (CFArrayRef (*)(RFTWiFiManagerRef))dlsym(handle, "WiFiManagerClientCopyDevices");
+    void (*scheduleFn)(RFTWiFiManagerRef, CFRunLoopRef, CFStringRef) =
+        (void (*)(RFTWiFiManagerRef, CFRunLoopRef, CFStringRef))dlsym(handle, "WiFiManagerClientScheduleWithRunLoop");
+    void (*unscheduleFn)(RFTWiFiManagerRef) =
+        (void (*)(RFTWiFiManagerRef))dlsym(handle, "WiFiManagerClientUnscheduleFromRunLoop");
+    void (*scanFn)(RFTWiFiDeviceRef, CFDictionaryRef, RFTWiFiScanCallback, uint32_t) =
+        (void (*)(RFTWiFiDeviceRef, CFDictionaryRef, RFTWiFiScanCallback, uint32_t))dlsym(handle, "WiFiDeviceClientScanAsync");
+
+    if (!createFn || !copyDevicesFn || !scanFn) {
+        *errorMessage = @"MobileWiFi 符号缺失，当前 iOS 版本不兼容";
+        dlclose(handle);
+        return nil;
+    }
+
+    RFTWiFiManagerRef manager = createFn(kCFAllocatorDefault, 0);
+    if (!manager) {
+        *errorMessage = @"WiFiManagerClientCreate 失败（缺少 com.apple.wifi.manager-access 权限？）";
+        dlclose(handle);
+        return nil;
+    }
+
+    CFArrayRef devices = copyDevicesFn(manager);
+    if (!devices || CFArrayGetCount(devices) == 0) {
+        *errorMessage = @"获取 WiFi 设备失败（WiFi 未开启或权限不足）";
+        if (devices) CFRelease(devices);
+        CFRelease(manager);
+        dlclose(handle);
+        return nil;
+    }
+
+    RFTWiFiDeviceRef device = (RFTWiFiDeviceRef)CFArrayGetValueAtIndex(devices, 0);
+
+    gMobileScanDone = NO;
+    gMobileScanResults = nil;
+    gMobileScanCallbackError = nil;
+    gMobileScanRunLoop = CFRunLoopGetCurrent();
+
+    if (scheduleFn) scheduleFn(manager, gMobileScanRunLoop, kCFRunLoopDefaultMode);
+
+    CFDictionaryRef options = CFDictionaryCreate(kCFAllocatorDefault, NULL, NULL, 0,
+                                                 &kCFTypeDictionaryKeyCallBacks,
+                                                 &kCFTypeDictionaryValueCallBacks);
+    scanFn(device, options, RFTMobileScanCallback, 0);
+    CFRelease(options);
+
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:8.0];
+    while (!gMobileScanDone && [deadline timeIntervalSinceNow] > 0) {
+        @autoreleasepool {
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.25, false);
+        }
+    }
+
+    if (unscheduleFn) unscheduleFn(manager);
+    CFRelease(devices);
+    CFRelease(manager);
+    dlclose(handle);
+    gMobileScanRunLoop = NULL;
+
+    if (!gMobileScanDone) {
+        *errorMessage = @"MobileWiFi 扫描超时（wifid 未响应）";
+        return nil;
+    }
+    if (gMobileScanCallbackError) {
+        *errorMessage = [NSString stringWithFormat:@"扫描回调错误：%@", gMobileScanCallbackError];
+    }
+    return gMobileScanResults;
+}
+
+#pragma mark - Apple80211（旧版兜底）
+
++ (NSArray<WifiNetworkInfo *> *)scanViaApple80211Error:(NSString **)errorMessage {
+    NSMutableArray<WifiNetworkInfo *> *items = [NSMutableArray array];
+    void *handle = dlopen("/System/Library/PrivateFrameworks/Apple80211.framework/Apple80211", RTLD_NOW);
+    if (!handle) {
+        *errorMessage = @"无法加载 Apple80211 私有框架";
+        return items;
+    }
+
+    int (*openFn)(void **) = (int (*)(void **))dlsym(handle, "Apple80211Open");
+    int (*bindFn)(void *, CFStringRef) = (int (*)(void *, CFStringRef))dlsym(handle, "Apple80211BindToInterface");
+    int (*scanFn)(void *, void **, void *) = (int (*)(void *, void **, void *))dlsym(handle, "Apple80211Scan");
+    int (*closeFn)(void *) = (int (*)(void *))dlsym(handle, "Apple80211Close");
+    if (!openFn || !scanFn) {
+        *errorMessage = @"Apple80211 符号缺失";
+        dlclose(handle);
+        return items;
+    }
+
+    void *wifi = NULL;
+    int opened = openFn(&wifi);
+    if (opened != 0 || !wifi) {
+        *errorMessage = [NSString stringWithFormat:@"Apple80211Open 失败 (code %d)", opened];
+        dlclose(handle);
+        return items;
+    }
+    if (bindFn) bindFn(wifi, CFSTR("en0"));
+
+    void *rawResults = NULL;
+    int status = scanFn(wifi, &rawResults, NULL);
+    if (closeFn) closeFn(wifi);
+
+    if (status != 0 || !rawResults) {
+        *errorMessage = [NSString stringWithFormat:@"Apple80211Scan 失败 (code %d)", status];
+        dlclose(handle);
+        return items;
+    }
+
+    NSArray *networks = (__bridge NSArray *)rawResults;
+    for (id obj in networks) {
+        if ([obj isKindOfClass:[NSDictionary class]]) {
+            [items addObject:RFTNetworkFromDictionary((NSDictionary *)obj)];
+        }
+    }
+    dlclose(handle);
+    return items;
+}
+
+#pragma mark - CoreWLAN 补充频宽
+
 + (void)fillWidthsFromCoreWLAN:(NSMutableArray<WifiNetworkInfo *> *)items {
     if (items.count == 0) return;
     void *cw = dlopen("/System/Library/PrivateFrameworks/CoreWLAN.framework/CoreWLAN", RTLD_NOW);
@@ -104,8 +290,8 @@ static NSString *RFTSecurity(NSString *capabilities) {
         }
     }
     for (WifiNetworkInfo *item in items) {
-        if ([item.bssid length] > 0 &&
-            ([item.channelWidth length] == 0 || [item.channelWidth isEqualToString:@"未知"])) {
+        if (item.bssid.length > 0 &&
+            (item.channelWidth.length == 0 || [item.channelWidth isEqualToString:@"未知"])) {
             NSString *w = [widths objectForKey:[item.bssid uppercaseString]];
             if (w) item.channelWidth = w;
         }
@@ -113,72 +299,48 @@ static NSString *RFTSecurity(NSString *capabilities) {
     dlclose(cw);
 }
 
+#pragma mark - 对外接口
+
++ (NSString *)diagnostic {
+    return gDiagnostic;
+}
+
++ (NSString *)widthFromNetwork:(NSDictionary *)network {
+    return RFTWidthFromNetwork(network);
+}
+
 + (NSArray<WifiNetworkInfo *> *)scanNearby {
     NSMutableArray<WifiNetworkInfo *> *items = [NSMutableArray array];
+    NSMutableArray<NSString *> *notes = [NSMutableArray array];
 
-    void *handle = dlopen("/System/Library/PrivateFrameworks/Apple80211.framework/Apple80211", RTLD_NOW);
-    if (!handle) {
-        gDiagnostic = @"无法加载 Apple80211 私有框架，请确认设备已越狱";
-        return items;
+    NSString *mobileError = nil;
+    NSArray *mobileResults = [self scanViaMobileWiFiError:&mobileError];
+    if (mobileResults.count > 0) {
+        [items addObjectsFromArray:mobileResults];
+        [notes addObject:[NSString stringWithFormat:@"MobileWiFi 扫描到 %lu 个网络", (unsigned long)mobileResults.count]];
+    } else {
+        [notes addObject:[NSString stringWithFormat:@"MobileWiFi：%@", mobileError ?: @"无结果"]];
+
+        NSString *legacyError = nil;
+        NSArray *legacyResults = [self scanViaApple80211Error:&legacyError];
+        if (legacyResults.count > 0) {
+            [items addObjectsFromArray:legacyResults];
+            [notes addObject:[NSString stringWithFormat:@"Apple80211 扫描到 %lu 个网络", (unsigned long)legacyResults.count]];
+        } else {
+            [notes addObject:[NSString stringWithFormat:@"Apple80211：%@", legacyError ?: @"无结果"]];
+        }
     }
 
-    int (*openFn)(void **) = (int (*)(void **))dlsym(handle, "Apple80211Open");
-    int (*bindFn)(void *, CFStringRef) = (int (*)(void *, CFStringRef))dlsym(handle, "Apple80211BindToInterface");
-    int (*scanFn)(void *, void **, void *) = (int (*)(void *, void **, void *))dlsym(handle, "Apple80211Scan");
-    int (*closeFn)(void *) = (int (*)(void *))dlsym(handle, "Apple80211Close");
-    if (!openFn || !scanFn) {
-        gDiagnostic = @"Apple80211 符号缺失，当前 iOS 版本可能不兼容";
-        dlclose(handle);
-        return items;
-    }
-
-    void *wifi = NULL;
-    int opened = openFn(&wifi);
-    if (opened != 0 || !wifi) {
-        gDiagnostic = [NSString stringWithFormat:@"Apple80211Open 失败 (code %d)", opened];
-        dlclose(handle);
-        return items;
-    }
-    if (bindFn) bindFn(wifi, CFSTR("en0"));
-
-    void *rawResults = NULL;
-    int status = scanFn(wifi, &rawResults, NULL);
-    if (closeFn) closeFn(wifi);
-
-    if (status != 0 || !rawResults) {
-        gDiagnostic = [NSString stringWithFormat:@"WiFi 扫描失败 (code %d)，请确认 Wi-Fi 已开启", status];
-        dlclose(handle);
-        return items;
-    }
-
-    NSArray *networks = (__bridge NSArray *)rawResults;
-    for (id obj in networks) {
-        if (![obj isKindOfClass:[NSDictionary class]]) continue;
-        NSDictionary *net = (NSDictionary *)obj;
-
-        WifiNetworkInfo *item = [[WifiNetworkInfo alloc] init];
-        NSString *ssid = RFTString([net objectForKey:@"SSID"]);
-        if (!ssid) ssid = RFTString([net objectForKey:@"SSID_STR"]);
-        item.ssid = [ssid length] > 0 ? ssid : @"(隐藏网络)";
-        item.bssid = RFTString([net objectForKey:@"BSSID"]) ?: @"";
-        item.rssi = RFTInt([net objectForKey:@"RSSI"]);
-        item.channel = RFTInt([net objectForKey:@"CHANNEL"]);
-        item.frequencyMHz = RFTFrequency(item.channel);
-        item.band = RFTBand(item.frequencyMHz);
-        item.channelWidth = [self widthFromNetwork:net];
-        item.security = RFTSecurity(RFTString([net objectForKey:@"CAPABILITIES"]));
-        [items addObject:item];
-    }
-
-    dlclose(handle);
     [self fillWidthsFromCoreWLAN:items];
 
     NSInteger wide = 0;
     for (WifiNetworkInfo *item in items) {
-        if (![item.channelWidth isEqualToString:@"未知"]) wide++;
+        if (item.channelWidth.length > 0 && ![item.channelWidth isEqualToString:@"未知"]) wide++;
     }
-    gDiagnostic = [NSString stringWithFormat:@"发现 %ld 个网络，其中 %ld 个获取到频宽（频宽取决于路由器与系统上报能力）",
-                   (long)items.count, (long)wide];
+    gDiagnostic = [NSString stringWithFormat:@"%@；%ld 个网络获取到频宽。%@",
+                   [notes componentsJoinedByString:@"；"],
+                   (long)wide,
+                   items.count == 0 ? @"若持续失败，请确认已安装 AppSync Unified 并彻底关闭后台后重开 App。" : @""];
     return items;
 }
 

@@ -7,10 +7,12 @@
 
 两个平台都支持主动 DHCP Discover/Offer 探测，能确凿判断某台设备是否真的在运行 DHCP 服务器。
 
-### v1.1 / 1.3 更新
+### v1.2 / 1.3 更新
 
 - **扫描提速**：DHCP 广播探测与设备扫描改为并行；主机发现改成两阶段（先用 80/443/1900 三个高命中端口快速筛活跃主机，再只对它们做完整端口指纹），并缩短超时、提高并发。典型网络从十几秒降到几秒。
-- **附近 WiFi 频宽与信号强度**：列表显示每个 WiFi 的 SSID、RSSI(dBm)、信号百分比、频段（2.4/5/6 GHz）、信道、频宽（20/40/80/160 MHz 等）与加密方式。iOS 越狱版通过 `dlopen` 动态调用 Apple80211 / CoreWLAN 私有框架（不链接头文件）；Android 用 `WifiManager` + 反射读取 `getChannelWidth()` 兼容不同系统版本。
+- **附近 WiFi 频宽与信号强度**：列表显示每个 WiFi 的 SSID、RSSI(dBm)、信号百分比、频段（2.4/5/6 GHz）、信道、频宽（20/40/80/160 MHz 等）与加密方式。
+  - iOS 越狱版：iOS 14+ 通过 `MobileWiFi.framework` 的 `WiFiDeviceClientScanAsync` 异步扫描（旧系统回退到 Apple80211，CoreWLAN 补充频宽）。假签名已加入 `com.apple.wifi.manager-access`、`com.apple.private.corewifi.internal` 等私有权限，解决 iOS 17 上"没有权限读取"的问题。
+  - Android 版：用 `WifiManager` + 反射读取 `getChannelWidth()` 兼容不同系统版本。
 
 ## 🤖 安卓版（APK）
 

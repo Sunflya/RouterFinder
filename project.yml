@@ -14,8 +14,8 @@ settings:
   DEVELOPMENT_TEAM: "YOUR_TEAM_ID"
   ENABLE_PREVIEWS: YES
   IPHONEOS_DEPLOYMENT_TARGET: "17.2"
-  MARKETING_VERSION: "1.1"
-  CURRENT_PROJECT_VERSION: "2"
+  MARKETING_VERSION: "1.2"
+  CURRENT_PROJECT_VERSION: "3"
   ENABLE_BITCODE: NO
 
 targets:
@@ -41,8 +41,8 @@ targets:
         CFBundleDisplayName: "路由器探测"
         CFBundleName: "RouterFinder"
         CFBundleExecutable: "RouterFinder"
-        CFBundleShortVersionString: "1.1"
-        CFBundleVersion: "2"
+        CFBundleShortVersionString: "1.2"
+        CFBundleVersion: "3"
         NSLocalNetworkUsageDescription: "需要访问局域网，以发现 DHCP 路由器与其他网络设备。"
         NSBonjourServices:
           - _http._tcp.

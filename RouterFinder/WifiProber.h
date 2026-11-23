@@ -16,7 +16,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface WifiProber : NSObject
 
-/// 扫描附近 WiFi。越狱设备上通过 Apple80211 私有框架实现。
+/// 扫描附近 WiFi。iOS 14+ 使用 MobileWiFi 私有框架，旧系统回退到 Apple80211。
 + (NSArray<WifiNetworkInfo *> *)scanNearby;
 
 /// 最近一次扫描的诊断信息（失败原因或统计）

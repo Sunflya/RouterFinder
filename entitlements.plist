@@ -6,5 +6,17 @@
   <true/>
   <key>application-identifier</key>
   <string>com.sunflya.routerfinder</string>
+
+  <!-- iOS 14+ 读取附近 WiFi（SSID/RSSI/信道/频宽）所必需的私有权限 -->
+  <key>com.apple.wifi.manager-access</key>
+  <true/>
+  <key>com.apple.private.corewifi.internal</key>
+  <true/>
+  <key>com.apple.private.corewifi.internal-xpc</key>
+  <true/>
+  <key>com.apple.developer.networking.wifi-info</key>
+  <true/>
+  <key>com.apple.private.security.no-sandbox</key>
+  <true/>
 </dict>
 </plist>
