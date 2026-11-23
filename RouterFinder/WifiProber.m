@@ -1,5 +1,6 @@
 #import "WifiProber.h"
 #import <dlfcn.h>
+#import <math.h>
 #import <CoreFoundation/CoreFoundation.h>
 
 @implementation WifiNetworkInfo
@@ -21,6 +22,48 @@ static NSString *RFTString(id value) {
 static NSInteger RFTInt(id value) {
     if ([value respondsToSelector:@selector(integerValue)]) return [value integerValue];
     return 0;
+}
+
+/// 从 CFNumber / CFString 读取 double，兼容 iOS 各版本返回类型差异
+static BOOL RFTGetDouble(CFTypeRef ref, double *out) {
+    if (!ref) return NO;
+    CFTypeID type = CFGetTypeID(ref);
+    if (type == CFNumberGetTypeID()) {
+        return CFNumberGetValue((CFNumberRef)ref, kCFNumberDoubleType, out);
+    }
+    if (type == CFStringGetTypeID()) {
+        NSString *s = (__bridge NSString *)ref;
+        double d = [s doubleValue];
+        if (d == 0 && [[s lowercaseString] rangeOfString:@"nan"].location != NSNotFound) return NO;
+        *out = d;
+        return YES;
+    }
+    return NO;
+}
+
+/// 从任意 CF 值（数字、字符串或 RSSI 字典）里提取候选 dBm
+static NSArray<NSNumber *> *RFTRSSICandidatesFromCFValue(CFTypeRef ref) {
+    NSMutableArray<NSNumber *> *result = [NSMutableArray array];
+    if (!ref) return result;
+    if (CFGetTypeID(ref) == CFDictionaryGetTypeID()) {
+        CFDictionaryRef dict = (CFDictionaryRef)ref;
+        const CFStringRef keys[] = { CFSTR("RSSI_CTL_AGR"), CFSTR("RSSI"), CFSTR("RSSI_AVG"), CFSTR("rssi") };
+        for (NSUInteger i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+            double d = 0;
+            if (RFTGetDouble(CFDictionaryGetValue(dict, keys[i]), &d)) {
+                [result addObject:@((NSInteger)round(d))];
+            }
+        }
+    } else {
+        double d = 0;
+        if (RFTGetDouble(ref, &d)) [result addObject:@((NSInteger)round(d))];
+    }
+    return result;
+}
+
+/// 合理的 WiFi dBm 范围。0 dBm 是无效值，绝不能当成满格。
+static BOOL RFTIsValidRSSI(NSInteger v) {
+    return v >= -127 && v <= -10;
 }
 
 /// RSSI 在 MobileWiFi 里可能直接是 NSNumber，也可能是 {"RSSI_CTL_AGR": number} 字典
@@ -117,16 +160,63 @@ static NSArray<WifiNetworkInfo *> *gMobileScanResults = nil;
 static CFRunLoopRef gMobileScanRunLoop = NULL;
 static NSString *gMobileScanCallbackError = nil;
 static NSInteger gMobileScanRawCount = -1;
+static NSInteger gMobileRSSIOKCount = 0;
 
 // iOS 14+ 扫描结果里是 WiFiNetworkRef 不透明对象，必须用这些 C 函数取属性
 static CFPropertyListRef (*gNWGetProperty)(RFTWiFiNetworkRef, CFStringRef) = NULL;
 static int (*gNWGetIntProperty)(RFTWiFiNetworkRef, CFStringRef) = NULL;
 static float (*gNWGetFloatProperty)(RFTWiFiNetworkRef, CFStringRef) = NULL;
 static CFStringRef (*gNWGetSSID)(RFTWiFiNetworkRef) = NULL;
+static CFDictionaryRef (*gNWCopyRecord)(RFTWiFiNetworkRef) = NULL;
+static CFStringRef *gNWScaledRSSIKey = NULL;
 static Boolean (*gNWIsWEP)(RFTWiFiNetworkRef) = NULL;
 static Boolean (*gNWIsWPA)(RFTWiFiNetworkRef) = NULL;
 static Boolean (*gNWIsEAP)(RFTWiFiNetworkRef) = NULL;
 static Boolean (*gNWIsHidden)(RFTWiFiNetworkRef) = NULL;
+
+/// 提取真实 RSSI。iOS 17 上 WiFiNetworkGetFloatProperty("RSSI") 恒返回 0，
+/// 必须优先用 WiFiNetworkGetProperty + CFNumberGetValue（开源 airscan 的做法）。
+static NSInteger RFTExtractRSSI(RFTWiFiNetworkRef network) {
+    if (!network) return 0;
+    NSMutableArray<NSNumber *> *candidates = [NSMutableArray array];
+
+    if (gNWGetProperty) {
+        // 1) 首选：直接返回 dBm 的 "RSSI" 属性
+        [candidates addObjectsFromArray:RFTRSSICandidatesFromCFValue(gNWGetProperty(network, CFSTR("RSSI")))];
+        // 2) 部分系统把原始值放在 "RSSI_CTL_AGR"
+        [candidates addObjectsFromArray:RFTRSSICandidatesFromCFValue(gNWGetProperty(network, CFSTR("RSSI_CTL_AGR")))];
+        // 3) Apple scaled RSSI：0~1 的浮点数（1 为满格），换算成 dBm 近似值
+        if (gNWScaledRSSIKey && *gNWScaledRSSIKey) {
+            CFPropertyListRef scaled = gNWGetProperty(network, *gNWScaledRSSIKey);
+            double s = 0;
+            if (RFTGetDouble(scaled, &s) && s != 0) {
+                [candidates addObject:@((NSInteger)round(-100.0 + s * 60.0))];
+            }
+        }
+    }
+
+    // 4) WiFiNetworkCopyRecord 返回的完整属性字典
+    if (gNWCopyRecord) {
+        CFDictionaryRef record = gNWCopyRecord(network);
+        if (record) {
+            [candidates addObjectsFromArray:RFTRSSICandidatesFromCFValue(CFDictionaryGetValue(record, CFSTR("RSSI")))];
+            [candidates addObjectsFromArray:RFTRSSICandidatesFromCFValue(CFDictionaryGetValue(record, CFSTR("RSSI_CTL_AGR")))];
+            CFRelease(record);
+        }
+    }
+
+    // 5) 最后才用 GetFloatProperty（iOS 17 上通常为 0）
+    if (gNWGetFloatProperty) {
+        float f = gNWGetFloatProperty(network, CFSTR("RSSI"));
+        if (f != 0) [candidates addObject:@((NSInteger)roundf(f))];
+    }
+
+    for (NSNumber *n in candidates) {
+        NSInteger v = n.integerValue;
+        if (RFTIsValidRSSI(v)) return v;
+    }
+    return 0;
+}
 
 /// 从 WiFiNetworkRef 不透明对象提取网络信息（iOS 14+ 扫描结果类型）
 static WifiNetworkInfo *RFTNetworkFromWiFiNetworkRef(RFTWiFiNetworkRef network) {
@@ -148,18 +238,7 @@ static WifiNetworkInfo *RFTNetworkFromWiFiNetworkRef(RFTWiFiNetworkRef network) 
     }
     item.bssid = bssid ?: @"";
 
-    NSInteger rssi = 0;
-    if (gNWGetFloatProperty) {
-        rssi = (NSInteger)roundf(gNWGetFloatProperty(network, CFSTR("RSSI")));
-    } else if (gNWGetProperty) {
-        CFPropertyListRef ref = gNWGetProperty(network, CFSTR("RSSI"));
-        float f = 0;
-        if (ref && CFGetTypeID(ref) == CFNumberGetTypeID() &&
-            CFNumberGetValue((CFNumberRef)ref, kCFNumberFloatType, &f)) {
-            rssi = (NSInteger)roundf(f);
-        }
-    }
-    item.rssi = rssi;
+    item.rssi = RFTExtractRSSI(network);
 
     NSInteger channel = 0;
     if (gNWGetIntProperty) {
@@ -214,8 +293,14 @@ static void RFTMobileScanCallback(RFTWiFiDeviceRef device, CFArrayRef results, i
             if (info) [arr addObject:info];
         }
         gMobileScanResults = [arr copy];
+        NSInteger ok = 0;
+        for (WifiNetworkInfo *info in arr) {
+            if (RFTIsValidRSSI(info.rssi)) ok++;
+        }
+        gMobileRSSIOKCount = ok;
     } else {
         gMobileScanRawCount = 0;
+        gMobileRSSIOKCount = 0;
     }
     gMobileScanDone = YES;
     if (gMobileScanRunLoop) CFRunLoopStop(gMobileScanRunLoop);
@@ -249,6 +334,8 @@ static void RFTMobileScanCallback(RFTWiFiDeviceRef device, CFArrayRef results, i
     gNWGetIntProperty   = (int (*)(RFTWiFiNetworkRef, CFStringRef))dlsym(handle, "WiFiNetworkGetIntProperty");
     gNWGetFloatProperty = (float (*)(RFTWiFiNetworkRef, CFStringRef))dlsym(handle, "WiFiNetworkGetFloatProperty");
     gNWGetSSID          = (CFStringRef (*)(RFTWiFiNetworkRef))dlsym(handle, "WiFiNetworkGetSSID");
+    gNWCopyRecord       = (CFDictionaryRef (*)(RFTWiFiNetworkRef))dlsym(handle, "WiFiNetworkCopyRecord");
+    gNWScaledRSSIKey    = (CFStringRef *)dlsym(handle, "kWiFiScaledRSSIKey");
     gNWIsWEP            = (Boolean (*)(RFTWiFiNetworkRef))dlsym(handle, "WiFiNetworkIsWEP");
     gNWIsWPA            = (Boolean (*)(RFTWiFiNetworkRef))dlsym(handle, "WiFiNetworkIsWPA");
     gNWIsEAP            = (Boolean (*)(RFTWiFiNetworkRef))dlsym(handle, "WiFiNetworkIsEAP");
@@ -282,6 +369,7 @@ static void RFTMobileScanCallback(RFTWiFiDeviceRef device, CFArrayRef results, i
     gMobileScanResults = nil;
     gMobileScanCallbackError = nil;
     gMobileScanRawCount = -1;
+    gMobileRSSIOKCount = 0;
     gMobileScanRunLoop = CFRunLoopGetCurrent();
 
     if (scheduleFn) scheduleFn(manager, gMobileScanRunLoop, kCFRunLoopDefaultMode);
@@ -443,9 +531,17 @@ static void RFTMobileScanCallback(RFTWiFiDeviceRef device, CFArrayRef results, i
     for (WifiNetworkInfo *item in items) {
         if (item.channelWidth.length > 0 && ![item.channelWidth isEqualToString:@"未知"]) wide++;
     }
-    gDiagnostic = [NSString stringWithFormat:@"%@；%ld 个网络获取到频宽。%@",
+    NSInteger rssiOK = 0;
+    for (WifiNetworkInfo *item in items) {
+        if (RFTIsValidRSSI(item.rssi)) rssiOK++;
+    }
+    NSString *rssiNote = rssiOK > 0
+        ? [NSString stringWithFormat:@"%ld 个网络获取到信号强度", (long)rssiOK]
+        : @"信号强度读取失败（显示“未知”为正常回退，频宽/信道不受影响）";
+    gDiagnostic = [NSString stringWithFormat:@"%@；%ld 个网络获取到频宽；%@。%@",
                    [notes componentsJoinedByString:@"；"],
                    (long)wide,
+                   rssiNote,
                    items.count == 0 ? @"若持续失败，请确认已安装 AppSync Unified 并彻底关闭后台后重开 App。" : @""];
     return items;
 }

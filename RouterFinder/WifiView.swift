@@ -40,14 +40,14 @@ struct WifiView: View {
                                     Text(net.ssid)
                                         .font(.headline)
                                     Spacer()
-                                    Text("\(net.rssi) dBm")
+                                    Text(net.rssiText)
                                         .font(.caption.monospaced())
                                         .foregroundStyle(net.signalColor)
                                 }
                                 Text("\(net.band) · 信道 \(net.channel > 0 ? String(net.channel) : "?") · 频宽 \(net.channelWidth)")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
-                                Text("信号 \(net.signalPercent)% · \(net.security) · \(net.bssid)")
+                                Text("信号 \(net.signalPercentText) · \(net.security) · \(net.bssid)")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
                             }
@@ -68,7 +68,14 @@ struct WifiView: View {
             let found = WifiProber.scanNearby()
             let message = WifiProber.diagnostic()
             DispatchQueue.main.async {
-                networks = found.sorted { $0.rssi > $1.rssi }
+                networks = found.sorted { a, b in
+                    let av = a.hasValidRSSI
+                    let bv = b.hasValidRSSI
+                    if av && bv { return a.rssi > b.rssi }
+                    if av { return true }
+                    if bv { return false }
+                    return a.ssid < b.ssid
+                }
                 diagnostic = message
                 isScanning = false
             }
@@ -77,13 +84,29 @@ struct WifiView: View {
 }
 
 private extension WifiNetworkInfo {
-    var signalPercent: Int {
+    /// 0 dBm 是无效读数（iOS 私有接口取不到时的默认值），绝不能当成满格
+    var hasValidRSSI: Bool {
+        rssi >= -127 && rssi <= -10
+    }
+
+    var rssiText: String {
+        hasValidRSSI ? "\(rssi) dBm" : "未知 dBm"
+    }
+
+    var signalPercent: Int? {
+        guard hasValidRSSI else { return nil }
         if rssi >= -40 { return 100 }
         if rssi <= -95 { return 0 }
         return max(0, min(100, (rssi + 95) * 100 / 55))
     }
 
+    var signalPercentText: String {
+        guard let p = signalPercent else { return "未知" }
+        return "\(p)%"
+    }
+
     var signalColor: Color {
+        guard hasValidRSSI else { return .gray }
         if rssi >= -55 { return .green }
         if rssi >= -70 { return .orange }
         return .red
