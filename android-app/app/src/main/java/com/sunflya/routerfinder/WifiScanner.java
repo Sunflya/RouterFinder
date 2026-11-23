@@ -59,8 +59,8 @@ public final class WifiScanner {
 
             String connectedBssid = "";
             WifiInfo connected = wm.getConnectionInfo();
-            if (connected != null && connected.getBssid() != null) {
-                connectedBssid = connected.getBssid();
+            if (connected != null && connected.getBSSID() != null) {
+                connectedBssid = connected.getBSSID();
             }
 
             for (ScanResult r : results) {
