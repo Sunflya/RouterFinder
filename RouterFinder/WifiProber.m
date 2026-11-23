@@ -133,6 +133,8 @@ static void RFTMobileScanCallback(RFTWiFiDeviceRef device, CFArrayRef results, C
     if (gMobileScanRunLoop) CFRunLoopStop(gMobileScanRunLoop);
 }
 
+@implementation WifiProber
+
 /// iOS 14 起 Apple80211 已由 MobileWiFi 取代；使用异步扫描并在当前线程 RunLoop 上等待结果。
 + (NSArray<WifiNetworkInfo *> *)scanViaMobileWiFiError:(NSString **)errorMessage {
     *errorMessage = nil;
