@@ -11,3 +11,9 @@ __pycache__/
 .workbuddy/
 
 output/
+
+# Android build outputs (keep the signing keystore)
+android-app/.gradle/
+android-app/local.properties
+android-app/build/
+android-app/app/build/
