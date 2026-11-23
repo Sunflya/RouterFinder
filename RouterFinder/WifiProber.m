@@ -108,26 +108,114 @@ static WifiNetworkInfo *RFTNetworkFromDictionary(NSDictionary *net) {
 
 typedef void *RFTWiFiManagerRef;
 typedef void *RFTWiFiDeviceRef;
-typedef void (*RFTWiFiScanCallback)(RFTWiFiDeviceRef, CFArrayRef, CFErrorRef, void *);
+typedef void *RFTWiFiNetworkRef;
+// 注意：iOS 真实签名是 (device, results, int error, const void *token)，不是 CFErrorRef
+typedef void (*RFTWiFiScanCallback)(RFTWiFiDeviceRef, CFArrayRef, int, const void *);
 
 static BOOL gMobileScanDone = NO;
 static NSArray<WifiNetworkInfo *> *gMobileScanResults = nil;
 static CFRunLoopRef gMobileScanRunLoop = NULL;
 static NSString *gMobileScanCallbackError = nil;
+static NSInteger gMobileScanRawCount = -1;
 
-static void RFTMobileScanCallback(RFTWiFiDeviceRef device, CFArrayRef results, CFErrorRef error, void *token) {
-    if (error) {
-        NSString *desc = CFBridgingRelease(CFErrorCopyDescription(error));
-        gMobileScanCallbackError = desc.length > 0 ? desc : @"未知错误";
+// iOS 14+ 扫描结果里是 WiFiNetworkRef 不透明对象，必须用这些 C 函数取属性
+static CFPropertyListRef (*gNWGetProperty)(RFTWiFiNetworkRef, CFStringRef) = NULL;
+static int (*gNWGetIntProperty)(RFTWiFiNetworkRef, CFStringRef) = NULL;
+static float (*gNWGetFloatProperty)(RFTWiFiNetworkRef, CFStringRef) = NULL;
+static CFStringRef (*gNWGetSSID)(RFTWiFiNetworkRef) = NULL;
+static Boolean (*gNWIsWEP)(RFTWiFiNetworkRef) = NULL;
+static Boolean (*gNWIsWPA)(RFTWiFiNetworkRef) = NULL;
+static Boolean (*gNWIsEAP)(RFTWiFiNetworkRef) = NULL;
+static Boolean (*gNWIsHidden)(RFTWiFiNetworkRef) = NULL;
+
+/// 从 WiFiNetworkRef 不透明对象提取网络信息（iOS 14+ 扫描结果类型）
+static WifiNetworkInfo *RFTNetworkFromWiFiNetworkRef(RFTWiFiNetworkRef network) {
+    if (!network) return nil;
+    WifiNetworkInfo *item = [[WifiNetworkInfo alloc] init];
+
+    NSString *ssid = nil;
+    if (gNWGetSSID) {
+        CFStringRef ref = gNWGetSSID(network);
+        if (ref) ssid = (__bridge NSString *)ref;
+    }
+    BOOL hidden = (gNWIsHidden && gNWIsHidden(network));
+    item.ssid = (ssid.length > 0 && !hidden) ? ssid : @"(隐藏网络)";
+
+    NSString *bssid = nil;
+    if (gNWGetProperty) {
+        CFPropertyListRef ref = gNWGetProperty(network, CFSTR("BSSID"));
+        if (ref && CFGetTypeID(ref) == CFStringGetTypeID()) bssid = (__bridge NSString *)ref;
+    }
+    item.bssid = bssid ?: @"";
+
+    NSInteger rssi = 0;
+    if (gNWGetFloatProperty) {
+        rssi = (NSInteger)roundf(gNWGetFloatProperty(network, CFSTR("RSSI")));
+    } else if (gNWGetProperty) {
+        CFPropertyListRef ref = gNWGetProperty(network, CFSTR("RSSI"));
+        float f = 0;
+        if (ref && CFGetTypeID(ref) == CFNumberGetTypeID() &&
+            CFNumberGetValue((CFNumberRef)ref, kCFNumberFloatType, &f)) {
+            rssi = (NSInteger)roundf(f);
+        }
+    }
+    item.rssi = rssi;
+
+    NSInteger channel = 0;
+    if (gNWGetIntProperty) {
+        channel = gNWGetIntProperty(network, CFSTR("CHANNEL"));
+    } else if (gNWGetProperty) {
+        CFPropertyListRef ref = gNWGetProperty(network, CFSTR("CHANNEL"));
+        int c = 0;
+        if (ref && CFGetTypeID(ref) == CFNumberGetTypeID() &&
+            CFNumberGetValue((CFNumberRef)ref, kCFNumberIntType, &c)) channel = c;
+    }
+    item.channel = channel;
+    item.frequencyMHz = RFTFrequency(channel);
+    item.band = RFTBand(item.frequencyMHz);
+
+    NSString *width = nil;
+    if (gNWGetProperty) {
+        NSArray *keys = @[@"CHANNEL_WIDTH", @"CHANNEL_WIDTH_MHZ", @"CHANNEL_FLAGS",
+                          @"CHANNEL_BANDWIDTH", @"WIFI_CHANNEL_WIDTH"];
+        for (NSString *key in keys) {
+            CFPropertyListRef ref = gNWGetProperty(network, (__bridge CFStringRef)key);
+            if (!ref) continue;
+            if (CFGetTypeID(ref) == CFNumberGetTypeID()) {
+                width = RFTWidth((__bridge NSNumber *)ref);
+            } else if (CFGetTypeID(ref) == CFStringGetTypeID()) {
+                width = RFTWidth((__bridge NSString *)ref);
+            }
+            if (width) break;
+        }
+    }
+    item.channelWidth = width ?: @"未知";
+
+    NSMutableArray *sec = [NSMutableArray array];
+    if (gNWIsWPA && gNWIsWPA(network)) [sec addObject:@"WPA"];
+    if (gNWIsWEP && gNWIsWEP(network)) [sec addObject:@"WEP"];
+    if (gNWIsEAP && gNWIsEAP(network)) [sec addObject:@"EAP"];
+    item.security = sec.count > 0 ? [sec componentsJoinedByString:@"/"] : @"开放";
+    return item;
+}
+
+static void RFTMobileScanCallback(RFTWiFiDeviceRef device, CFArrayRef results, int error, const void *token) {
+    if (error != 0) {
+        gMobileScanCallbackError = [NSString stringWithFormat:@"扫描错误码 %d", error];
     }
     if (results) {
+        CFIndex count = CFArrayGetCount(results);
+        gMobileScanRawCount = count;
         NSMutableArray *arr = [NSMutableArray array];
-        for (id obj in (__bridge NSArray *)results) {
-            if ([obj isKindOfClass:[NSDictionary class]]) {
-                [arr addObject:RFTNetworkFromDictionary((NSDictionary *)obj)];
-            }
+        for (CFIndex i = 0; i < count; i++) {
+            void *raw = (void *)CFArrayGetValueAtIndex(results, i);
+            if (!raw) continue;
+            WifiNetworkInfo *info = RFTNetworkFromWiFiNetworkRef(raw);
+            if (info) [arr addObject:info];
         }
         gMobileScanResults = [arr copy];
+    } else {
+        gMobileScanRawCount = 0;
     }
     gMobileScanDone = YES;
     if (gMobileScanRunLoop) CFRunLoopStop(gMobileScanRunLoop);
@@ -156,7 +244,17 @@ static void RFTMobileScanCallback(RFTWiFiDeviceRef device, CFArrayRef results, C
     void (*scanFn)(RFTWiFiDeviceRef, CFDictionaryRef, RFTWiFiScanCallback, uint32_t) =
         (void (*)(RFTWiFiDeviceRef, CFDictionaryRef, RFTWiFiScanCallback, uint32_t))dlsym(handle, "WiFiDeviceClientScanAsync");
 
-    if (!createFn || !copyDevicesFn || !scanFn) {
+    // WiFiNetworkRef 属性函数：扫描结果解析依赖它们
+    gNWGetProperty      = (CFPropertyListRef (*)(RFTWiFiNetworkRef, CFStringRef))dlsym(handle, "WiFiNetworkGetProperty");
+    gNWGetIntProperty   = (int (*)(RFTWiFiNetworkRef, CFStringRef))dlsym(handle, "WiFiNetworkGetIntProperty");
+    gNWGetFloatProperty = (float (*)(RFTWiFiNetworkRef, CFStringRef))dlsym(handle, "WiFiNetworkGetFloatProperty");
+    gNWGetSSID          = (CFStringRef (*)(RFTWiFiNetworkRef))dlsym(handle, "WiFiNetworkGetSSID");
+    gNWIsWEP            = (Boolean (*)(RFTWiFiNetworkRef))dlsym(handle, "WiFiNetworkIsWEP");
+    gNWIsWPA            = (Boolean (*)(RFTWiFiNetworkRef))dlsym(handle, "WiFiNetworkIsWPA");
+    gNWIsEAP            = (Boolean (*)(RFTWiFiNetworkRef))dlsym(handle, "WiFiNetworkIsEAP");
+    gNWIsHidden         = (Boolean (*)(RFTWiFiNetworkRef))dlsym(handle, "WiFiNetworkIsHidden");
+
+    if (!createFn || !copyDevicesFn || !scanFn || !gNWGetProperty || !gNWGetSSID) {
         *errorMessage = @"MobileWiFi 符号缺失，当前 iOS 版本不兼容";
         dlclose(handle);
         return nil;
@@ -183,6 +281,7 @@ static void RFTMobileScanCallback(RFTWiFiDeviceRef device, CFArrayRef results, C
     gMobileScanDone = NO;
     gMobileScanResults = nil;
     gMobileScanCallbackError = nil;
+    gMobileScanRawCount = -1;
     gMobileScanRunLoop = CFRunLoopGetCurrent();
 
     if (scheduleFn) scheduleFn(manager, gMobileScanRunLoop, kCFRunLoopDefaultMode);
@@ -322,7 +421,11 @@ static void RFTMobileScanCallback(RFTWiFiDeviceRef device, CFArrayRef results, C
         [items addObjectsFromArray:mobileResults];
         [notes addObject:[NSString stringWithFormat:@"MobileWiFi 扫描到 %lu 个网络", (unsigned long)mobileResults.count]];
     } else {
-        [notes addObject:[NSString stringWithFormat:@"MobileWiFi：%@", mobileError ?: @"无结果"]];
+        if (gMobileScanRawCount > 0 && mobileError == nil) {
+            [notes addObject:[NSString stringWithFormat:@"MobileWiFi 收到 %ld 个结果但解析失败", (long)gMobileScanRawCount]];
+        } else {
+            [notes addObject:[NSString stringWithFormat:@"MobileWiFi：%@", mobileError ?: @"无结果"]];
+        }
 
         NSString *legacyError = nil;
         NSArray *legacyResults = [self scanViaApple80211Error:&legacyError];
