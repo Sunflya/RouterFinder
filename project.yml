@@ -41,6 +41,8 @@ targets:
         CFBundleDisplayName: "路由器探测"
         CFBundleName: "RouterFinder"
         CFBundleExecutable: "RouterFinder"
+        CFBundleShortVersionString: "1.1"
+        CFBundleVersion: "2"
         NSLocalNetworkUsageDescription: "需要访问局域网，以发现 DHCP 路由器与其他网络设备。"
         NSBonjourServices:
           - _http._tcp.
